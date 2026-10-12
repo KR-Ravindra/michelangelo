@@ -75,6 +75,12 @@ export type PipelineRun = {
     /** Inline pipeline spec for dev runs; regular runs reference a Pipeline instead. */
     pipelineSpec?: PipelineSnapshotSpec;
     notifications?: PipelineRunNotification[];
+    /**
+     * Set when a user requests this run be stopped. The run keeps reporting its real
+     * `status.state` until the kill actually takes effect, so callers that want to show
+     * an in-progress "Killing" state need to check this alongside `status.state`.
+     */
+    kill?: boolean;
   };
   status?: {
     /** Snapshot of the pipeline this run executes, captured when the run starts. */
@@ -129,6 +135,13 @@ export enum PipelineRunState {
   FAILED = 'PIPELINE_RUN_STATE_FAILED',
   SKIPPED = 'PIPELINE_RUN_STATE_SKIPPED',
 }
+
+/**
+ * Synthetic run state for a run that has a kill requested (`spec.kill`) but has not reached a
+ * terminal state yet. It is not a real proto value, so it lives beside `PipelineRunState`
+ * rather than as a member of it.
+ */
+export const KILLING_RUN_STATE = 'KILLING' as const;
 
 /** Mirrors proto PipelineRunStepState enum (pipeline_run.proto). */
 export enum PipelineRunStepState {
