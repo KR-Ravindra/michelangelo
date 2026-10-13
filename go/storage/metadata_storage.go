@@ -84,6 +84,10 @@ type ListResponse struct {
 
 	// Items are the objects returned by the MetadataStorage.List() call.
 	Items []runtime.Object
+
+	// RemainingItemCount is the number of matching objects after this page. It is only set when
+	// ListOptionsExt.IncludeTotal is true.
+	RemainingItemCount *int64
 }
 
 // IndexedObject interface defines a list of functions that an API object may implement to allow indexing in metadata

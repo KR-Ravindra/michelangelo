@@ -927,3 +927,47 @@ func TestIntegration_DirectUpdate_ReregisterModelKeepsStoredArtifactURI(t *testi
 		"the caller's object keeps the URI it sent, so caller and storage disagree")
 	assert.Equal(t, "2", second.GetResourceVersion())
 }
+
+// TestIntegration_List_IncludeTotal verifies that IncludeTotal returns the number of
+// matching rows after the current page, computed with the same filters as the list query,
+// against the pre-existing "california-housing" pipeline_run rows.
+func TestIntegration_List_IncludeTotal(t *testing.T) {
+	db := openIntegrationDB(t)
+	store := newIntegrationStorage(t, db)
+	ctx := context.Background()
+
+	typeMeta := &metav1.TypeMeta{Kind: "PipelineRun", APIVersion: "michelangelo.api/v2"}
+	const namespace = "california-housing"
+
+	var all storage.ListResponse
+	require.NoError(t, store.List(ctx, typeMeta, namespace, &metav1.ListOptions{}, &apipb.ListOptionsExt{}, &all))
+	total := int64(len(all.Items))
+	require.GreaterOrEqual(t, total, int64(5), "expected the real pre-existing california-housing pipeline runs")
+	assert.Nil(t, all.RemainingItemCount, "RemainingItemCount must stay unset without IncludeTotal")
+
+	tests := []struct {
+		name          string
+		offset, limit int32
+		wantItems     int64
+		wantRemaining int64
+	}{
+		{name: "first page", offset: 0, limit: 2, wantItems: 2, wantRemaining: total - 2},
+		{name: "middle page", offset: 1, limit: 2, wantItems: 2, wantRemaining: total - 3},
+		{name: "partial last page", offset: int32(total) - 1, limit: 2, wantItems: 1, wantRemaining: 0},
+		{name: "offset past end", offset: int32(total) + 5, limit: 2, wantItems: 0, wantRemaining: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := &apipb.ListOptionsExt{
+				OrderBy:      []*apipb.OrderBy{{Field: "create_time", Dir: apipb.SORT_ORDER_DESC}},
+				Pagination:   &apipb.PaginationSpec{Offset: tt.offset, Limit: tt.limit},
+				IncludeTotal: true,
+			}
+			var resp storage.ListResponse
+			require.NoError(t, store.List(ctx, typeMeta, namespace, &metav1.ListOptions{}, opts, &resp))
+			assert.Len(t, resp.Items, int(tt.wantItems))
+			require.NotNil(t, resp.RemainingItemCount)
+			assert.Equal(t, tt.wantRemaining, *resp.RemainingItemCount)
+		})
+	}
+}

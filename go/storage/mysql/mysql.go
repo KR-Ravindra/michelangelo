@@ -290,6 +290,10 @@ func (m *mysqlMetadataStorage) GetByID(ctx context.Context, uid string, object r
 //	      [<label-selector NOT EXISTS clauses>]
 //	      [ORDER BY ...]
 //	      [LIMIT ? [OFFSET ?]]
+//
+// When ListOptionsExt.IncludeTotal is set and the page is full, a second query
+// with the same WITH/FROM/WHERE but SELECT COUNT(*) (no ORDER BY / LIMIT)
+// computes listResponse.RemainingItemCount.
 func (m *mysqlMetadataStorage) List(ctx context.Context, typeMeta *metav1.TypeMeta, namespace string, listOptions *metav1.ListOptions, listOptionsExt *apipb.ListOptionsExt, listResponse *storage.ListResponse) error {
 	tableName := getTableNameFromTypeMeta(typeMeta)
 	if tableName == "" {
@@ -343,15 +347,15 @@ func (m *mysqlMetadataStorage) List(ctx context.Context, typeMeta *metav1.TypeMe
 	}
 
 	// Assemble the query. The CTEs (if any) come first as a single
-	// comma-separated WITH clause, then SELECT/FROM/JOINs, then WHERE.
-	var query strings.Builder
+	// comma-separated WITH clause, then SELECT/FROM/JOINs, then WHERE. The WITH
+	// clause and the FROM/WHERE body are built separately so the IncludeTotal
+	// COUNT(*) query can reuse them with a different SELECT list.
+	withClause := ""
 	if len(labelPieces.withAliases) > 0 {
-		query.WriteString("WITH ")
-		query.WriteString(strings.Join(labelPieces.withAliases, ", "))
-		query.WriteByte(' ')
+		withClause = "WITH " + strings.Join(labelPieces.withAliases, ", ") + " "
 	}
-	query.WriteString("SELECT `uid`, `group_ver`, `namespace`, `name`, `res_version`, ")
-	query.WriteString("`create_time`, `update_time`, `proto` FROM `")
+	var query strings.Builder
+	query.WriteString(" FROM `")
 	query.WriteString(tableName)
 	query.WriteByte('`')
 	for _, j := range labelPieces.joinClauses {
@@ -393,6 +397,16 @@ func (m *mysqlMetadataStorage) List(ctx context.Context, typeMeta *metav1.TypeMe
 	}
 	args = append(args, labelPieces.whereParams...)
 
+	// Snapshot the filter-only FROM/WHERE body and its args for the COUNT(*)
+	// query before ORDER BY / LIMIT are appended.
+	fromWhere := query.String()
+	countArgs := append(append([]interface{}{}, labelPieces.withParams...), args...)
+
+	query.Reset()
+	query.WriteString(withClause)
+	query.WriteString("SELECT `uid`, `group_ver`, `namespace`, `name`, `res_version`, ")
+	query.WriteString("`create_time`, `update_time`, `proto`")
+	query.WriteString(fromWhere)
 	query.WriteString(orderBySQL)
 
 	// Pagination: prefer the structured Pagination field; otherwise fall back
@@ -427,7 +441,31 @@ func (m *mysqlMetadataStorage) List(ctx context.Context, typeMeta *metav1.TypeMe
 		args = append(labelPieces.withParams, args...)
 	}
 
-	return m.executeListQueryAndProcessResult(ctx, query.String(), args, limit, offset, typeMeta, listResponse)
+	if err := m.executeListQueryAndProcessResult(ctx, query.String(), args, limit, offset, typeMeta, listResponse); err != nil {
+		return err
+	}
+
+	if listOptionsExt == nil || !listOptionsExt.IncludeTotal {
+		return nil
+	}
+	// A partial (or unpaginated) page is the last page, so nothing remains and
+	// the COUNT(*) round-trip can be skipped.
+	var total int64
+	if limit > 0 && int64(len(listResponse.Items)) >= limit {
+		countQuery := withClause + "SELECT COUNT(*)" + fromWhere
+		if err := m.db.QueryRowContext(ctx, countQuery, countArgs...).Scan(&total); err != nil {
+			return status.Errorf(codes.Internal, "failed to count objects: %v", err)
+		}
+	}
+	listResponse.RemainingItemCount = remainingItemCount(total, offset, len(listResponse.Items))
+	return nil
+}
+
+// remainingItemCount returns the number of matching objects after the current
+// page, clamped at zero.
+func remainingItemCount(total, offset int64, pageSize int) *int64 {
+	remaining := max(total-offset-int64(pageSize), 0)
+	return &remaining
 }
 
 // executeListQueryAndProcessResult runs a SELECT query against the main table,

@@ -101,4 +101,10 @@ message ListOptionsExt {
     // A list of field names that need to be removed in returned result
     // Specify the path of the field such as spec.legacy_model_spec.training_job_id
     repeated string returned_field_skip_list = 4;
+
+    // When true, the server also counts the objects matching the filters (ignoring pagination)
+    // and returns the number of matching objects after the current page in
+    // ListMeta.remaining_item_count. Total = pagination.offset + len(items) + remaining_item_count.
+    // Only supported when metadata storage is enabled.
+    bool include_total = 5;
 }

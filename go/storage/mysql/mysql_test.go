@@ -888,3 +888,25 @@ func TestMergeManagedKeys_EmptyResultIsNil(t *testing.T) {
 	// empty map, so an object without labels does not gain one.
 	require.Nil(t, mergeManagedKeys(nil, nil, directUpdateManagedLabels))
 }
+
+func TestRemainingItemCount(t *testing.T) {
+	tests := []struct {
+		name     string
+		total    int64
+		offset   int64
+		pageSize int
+		want     int64
+	}{
+		{name: "first page", total: 25, offset: 0, pageSize: 10, want: 15},
+		{name: "middle page", total: 25, offset: 10, pageSize: 10, want: 5},
+		{name: "exact last page", total: 20, offset: 10, pageSize: 10, want: 0},
+		{name: "offset past end clamps to zero", total: 5, offset: 10, pageSize: 0, want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := remainingItemCount(tt.total, tt.offset, tt.pageSize)
+			require.NotNil(t, got)
+			require.Equal(t, tt.want, *got)
+		})
+	}
+}

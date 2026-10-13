@@ -65,6 +65,7 @@ func (m *MetadataHandlerImpl) List(ctx context.Context, namespace string, opts *
 		return err
 	}
 	list.SetContinue(listResponse.Continue)
+	list.SetRemainingItemCount(listResponse.RemainingItemCount)
 	return meta.SetList(list, listResponse.Items)
 }
 
