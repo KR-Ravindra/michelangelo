@@ -3,13 +3,18 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "go_default_library",
     srcs = [
+        "adapt.go",
         "auth.go",
         "authn.go",
         "doc.go",
+        "mapping.go",
     ],
     importpath = "github.com/michelangelo-ai/michelangelo/go/auth",
     visibility = ["//visibility:public"],
     deps = [
+        "@io_k8s_apiserver//pkg/authentication/authenticator:go_default_library",
+        "@io_k8s_apiserver//pkg/authentication/user:go_default_library",
+        "@io_k8s_apiserver//pkg/authorization/authorizer:go_default_library",
         "@org_uber_go_fx//:go_default_library",
         "@org_uber_go_yarpc//api/middleware:go_default_library",
         "@org_uber_go_yarpc//api/transport:go_default_library",
@@ -21,16 +26,27 @@ go_library(
 go_test(
     name = "go_default_test",
     srcs = [
+        "adapt_test.go",
         "auth_test.go",
         "authn_test.go",
+        "export_test.go",
+        "mapping_external_test.go",
     ],
     embed = [":go_default_library"],
     deps = [
+        "//proto/api/v2:go_default_library",
         "@com_github_stretchr_testify//assert:go_default_library",
         "@com_github_stretchr_testify//require:go_default_library",
+        "@io_k8s_apiextensions_apiserver//pkg/apis/apiextensions/v1:go_default_library",
+        "@io_k8s_apimachinery//pkg/util/yaml:go_default_library",
+        "@io_k8s_apiserver//pkg/authentication/authenticator:go_default_library",
+        "@io_k8s_apiserver//pkg/authentication/user:go_default_library",
+        "@io_k8s_apiserver//pkg/authorization/authorizer:go_default_library",
         "@org_uber_go_fx//:go_default_library",
         "@org_uber_go_fx//fxtest:go_default_library",
         "@org_uber_go_yarpc//api/transport:go_default_library",
         "@org_uber_go_yarpc//yarpcerrors:go_default_library",
+        "@org_uber_go_zap//:go_default_library",
+        "@org_uber_go_zap//zaptest/observer:go_default_library",
     ],
 )
