@@ -2,6 +2,7 @@ package worker
 
 import (
 	"crypto/tls"
+	"fmt"
 	"strings"
 
 	"go.uber.org/config"
@@ -13,7 +14,11 @@ import (
 	"go.uber.org/yarpc/peer/hostport"
 	"go.uber.org/yarpc/transport/grpc"
 	"google.golang.org/grpc/credentials"
+	"k8s.io/client-go/kubernetes"
 
+	"github.com/michelangelo-ai/michelangelo/go/auth"
+	baseconfig "github.com/michelangelo-ai/michelangelo/go/base/config"
+	"github.com/michelangelo-ai/michelangelo/go/worker/runnertoken"
 	v2pb "github.com/michelangelo-ai/michelangelo/proto-go/api/v2"
 )
 
@@ -24,6 +29,10 @@ type Config struct {
 	MaAPIServiceName string `yaml:"maApiServiceName"`
 	Address          string `yaml:"address"`
 	UseTLS           bool   `yaml:"useTLS"`
+	// RunnerToken, when enabled, attaches per-project michelangelo-runner
+	// bearer tokens to outbound RPCs; disabled (the default) the worker's
+	// traffic is unchanged.
+	RunnerToken runnertoken.Config `yaml:"runnerToken"`
 }
 
 // Params provides dependencies for YARPC dispatcher.
@@ -98,6 +107,54 @@ func NewYARPCDispatcher(p Params) (*yarpc.Dispatcher, error) {
 	}
 
 	return dispatcher, nil
+}
+
+// RunnerTokenMiddlewareParams collects NewRunnerTokenOutboundMiddleware's
+// dependencies.
+type RunnerTokenMiddlewareParams struct {
+	fx.In
+
+	Provider config.Provider
+}
+
+// RunnerTokenMiddlewareResult carries the optional outbound middleware for
+// NewYARPCDispatcher's Params.OutboundMiddleware slot. Left nil when the
+// runnerToken feature is off (the default): fx accepts a nil value for an
+// optional interface output, and NewYARPCDispatcher's own
+// `if p.OutboundMiddleware != nil` check then adds nothing, so a disabled
+// worker's traffic -- and its need for cluster credentials -- is unchanged.
+type RunnerTokenMiddlewareResult struct {
+	fx.Out
+
+	OutboundMiddleware middleware.UnaryOutbound `optional:"true"`
+}
+
+// NewRunnerTokenOutboundMiddleware builds the per-project runner-token
+// outbound middleware when worker.runnerToken.enabled, adapting
+// runnertoken's Minter into auth.TokenSource for use with
+// auth.NewBearerOutboundMiddleware -- the same middleware slot
+// cmd/apiserver wires its inbound counterpart through (see go/auth).
+func NewRunnerTokenOutboundMiddleware(p RunnerTokenMiddlewareParams) (RunnerTokenMiddlewareResult, error) {
+	conf, err := NewConfig(p.Provider)
+	if err != nil {
+		return RunnerTokenMiddlewareResult{}, fmt.Errorf("worker: cannot parse %s configuration: %w", configKey, err)
+	}
+	if !conf.RunnerToken.Enabled {
+		return RunnerTokenMiddlewareResult{}, nil
+	}
+
+	k8sConfig, err := baseconfig.GetK8sConfig(p.Provider)
+	if err != nil {
+		return RunnerTokenMiddlewareResult{}, fmt.Errorf("worker: runner-token middleware needs a kubernetes client: %w", err)
+	}
+	client, err := kubernetes.NewForConfig(k8sConfig)
+	if err != nil {
+		return RunnerTokenMiddlewareResult{}, fmt.Errorf("worker: runner-token middleware needs a kubernetes client: %w", err)
+	}
+	minter := runnertoken.NewMinter(client, conf.RunnerToken)
+	return RunnerTokenMiddlewareResult{
+		OutboundMiddleware: auth.NewBearerOutboundMiddleware(runnertoken.NewTokenSource(minter)),
+	}, nil
 }
 
 // NewRayClusterServiceClient creates a RayClusterService YARPC client.
