@@ -167,8 +167,10 @@ apiserver:
     # michelangelo/environment label value the restriction applies to. An
     # environment name absent from this map is unrestricted. By default,
     # "production" is restricted to the main/master branches only -- set
-    # this to {} to disable all branch restrictions, or add/replace keys
-    # to customize per environment.
+    # "production: null" (removes the key) or "production: []" to disable
+    # the restriction, or replace the list to use your own branches. Note
+    # that Helm deep-merges maps, so setting restrictedBranches to {} does
+    # NOT remove the default "production" entry.
     restrictedBranches:
       production: [main, master]
 

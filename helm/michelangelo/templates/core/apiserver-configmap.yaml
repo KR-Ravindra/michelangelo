@@ -21,7 +21,7 @@ data:
         environment: {{ .Values.apiserver.pipelineRunDefaults.environment | default "" | quote }}
         restrictedBranches:
         {{- range $env, $branches := .Values.apiserver.pipelineRunDefaults.restrictedBranches }}
-          {{ $env }}:
+          {{ $env | quote }}:
           {{- range $branches }}
           - {{ . | quote }}
           {{- end }}

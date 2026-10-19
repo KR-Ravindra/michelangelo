@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/michelangelo-ai/michelangelo/go/api"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/config"
@@ -50,6 +51,26 @@ apiserver:
 		require.NoError(t, err)
 
 		assert.Equal(t, map[string][]string{"prod": {"main"}}, conf.RestrictedBranches)
+	})
+
+	t.Run("present but empty or null environment entries are unrestricted", func(t *testing.T) {
+		yaml := `
+apiserver:
+  pipelineRunDefaults:
+    restrictedBranches:
+      production: []
+      staging:
+`
+		provider, err := config.NewYAML(config.Source(strings.NewReader(yaml)))
+		require.NoError(t, err)
+
+		conf, err := NewConfig(provider)
+		require.NoError(t, err)
+
+		assert.Empty(t, conf.RestrictedBranches["production"])
+		assert.Empty(t, conf.RestrictedBranches["staging"])
+		assert.True(t, api.IsBranchAllowedForEnvironment("production", "feature/x", conf.RestrictedBranches))
+		assert.True(t, api.IsBranchAllowedForEnvironment("staging", "feature/x", conf.RestrictedBranches))
 	})
 
 	t.Run("absent restrictedBranches key yields nil map", func(t *testing.T) {
