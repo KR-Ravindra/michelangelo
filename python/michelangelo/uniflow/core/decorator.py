@@ -436,7 +436,7 @@ def workflow(
     on_failure: Optional[Callable[[WorkflowFailure], object]] = None,
     *,
     _failure_lowering: Optional[FailureLowering] = None,
-):
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Decorator for defining a Uniflow workflow.
 
     Marks a function as a workflow entry point. When provided, on_failure is
