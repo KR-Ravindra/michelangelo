@@ -1,15 +1,18 @@
 """Tests for local workflow failure callbacks and remote packaging."""
 
 import json
+import os
 import unittest
+from unittest.mock import patch
 
 from michelangelo.uniflow.core.build import build
+from michelangelo.uniflow.core.context import _local_run
 from michelangelo.uniflow.core.decorator import workflow
 from michelangelo.uniflow.core.failure import FailureEntrypoint, WorkflowFailure
 
 
 def report_workflow_failure(failure: WorkflowFailure) -> str:
-    """Return a field supported by both local and remote failure values."""
+    """Read a field supported by both local and remote failure values."""
     return failure.reason
 
 
@@ -17,6 +20,12 @@ def report_workflow_failure(failure: WorkflowFailure) -> str:
 def handled_workflow():
     """Provide a workflow whose failure handler can be packaged."""
     return "ok"
+
+
+@workflow(on_failure=report_workflow_failure)
+def failing_local_workflow():
+    """Exercise local execution without a remote failure backend."""
+    return 1 / 0
 
 
 def lower_failure(workflow_file, workflow_function, handler_file, handler_function):
@@ -31,6 +40,12 @@ def lower_failure(workflow_file, workflow_function, handler_file, handler_functi
             "    return original()\n"
         ),
     )
+
+
+@workflow(on_failure=report_workflow_failure, _failure_lowering=lower_failure)
+def handled_workflow_with_backend():
+    """Exercise a workflow with its backend supplied at decoration time."""
+    return "ok"
 
 
 class TestWorkflowFailure(unittest.TestCase):
@@ -60,12 +75,16 @@ class TestWorkflowFailure(unittest.TestCase):
 
     def test_handled_workflow_uses_decorator_backend(self):
         """A decorator-provided backend also reaches direct build calls."""
-        handled_workflow._uf_failure_lowering = lower_failure
-        try:
-            package = build(handled_workflow)
-            self.assertEqual(package.main_function, "__failure_entrypoint")
-        finally:
-            handled_workflow._uf_failure_lowering = None
+        package = build(handled_workflow_with_backend)
+        self.assertEqual(package.main_function, "__failure_entrypoint")
+
+    def test_local_run_uses_python_handler_without_remote_backend(self):
+        """Local execution should not require a Starlark failure backend."""
+        with (
+            patch.dict(os.environ),
+            self.assertRaisesRegex(ZeroDivisionError, "division by zero"),
+        ):
+            _local_run(failing_local_workflow)
 
     def test_on_failure_receives_classified_failure_and_reraises(self):
         """Local handlers receive classification without swallowing the error."""

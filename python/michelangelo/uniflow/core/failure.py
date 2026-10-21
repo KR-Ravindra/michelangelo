@@ -6,7 +6,12 @@ from typing import Callable
 
 @dataclass(frozen=True)
 class WorkflowFailure:
-    """Information passed to a workflow's local failure handler."""
+    """Local equivalent of the remote worker's failure value.
+
+    Locally, ``reason`` and ``details["exception_type"]`` contain the Python
+    exception class. Remote workers use backend error codes for ``reason`` and
+    include ``exception_type`` only when the error supplies one.
+    """
 
     message: str
     reason: str
