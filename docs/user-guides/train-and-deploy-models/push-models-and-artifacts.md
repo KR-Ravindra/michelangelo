@@ -523,7 +523,7 @@ The built-in sinks are `LocalFileEvalReportSink` and `APIClientEvalReportSink`, 
 
 **Dispatch.** Sinks run synchronously, once each, in list order. They are **fail-fast**: if a sink raises, the exception propagates and the sinks after it aren't called. Sinks don't need to be thread-safe.
 
-**Minimal implementation.** `flatten_report_to_metrics(report)` converts the report into a flat `{metric_name: value}` dict for key-value systems such as MLflow `log_metrics`. It skips charts with more than one series, and series with more than one data point, and logs a warning for each one it skips.
+**Minimal implementation.** `flatten_report_to_metrics(report)` converts the report into a flat `{metric_name: value}` dict for key-value systems such as MLflow `log_metrics`. It reads scalar charts and single-point series of line, point, bar and time-series charts; a chart with several series keys each one as `<title>/<line_name>`. Multi-point series are skipped with a warning. `flatten_report_to_metric_history(report)` returns every series as `(x, y)` points instead, for `log_metric(key, value, step=x)`.
 
 ```python
 from typing import Any

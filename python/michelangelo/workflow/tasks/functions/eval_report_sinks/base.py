@@ -9,7 +9,6 @@ ready-made helper.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
@@ -22,7 +21,60 @@ if TYPE_CHECKING:
         EvalReportSinkResult,
     )
 
-__all__ = ["EvalReportSink", "flatten_report_to_metrics"]
+__all__ = [
+    "EvalReportSink",
+    "flatten_report_to_metric_history",
+    "flatten_report_to_metrics",
+]
+
+
+# Chart fields that hold a list of ChartDataset (x/y point series).
+_DATASET_FIELDS = (
+    ("line_chart", "lines"),
+    ("point_chart", "point_sets"),
+    ("bar_chart", "bars"),
+    ("time_series", "lines"),
+)
+
+
+def _cell_number(cell: Any) -> float | None:
+    """Return a ChartCellValue as a float, or ``None`` if it is not numeric."""
+    if cell.str_value:
+        try:
+            return float(cell.str_value)
+        except ValueError:
+            return None
+    return cell.number
+
+
+def _chart_series(
+    report: EvaluationReport,
+) -> list[tuple[str, list[tuple[float, float]]]]:
+    """Return ``(key, [(x, y), ...])`` for every numeric series in the report.
+
+    Scalar charts yield one point with ``x == 0``. Charts with several datasets
+    key each one as ``"<title>/<line_name>"`` (``series_<j>`` when unnamed).
+    """
+    out: list[tuple[str, list[tuple[float, float]]]] = []
+    for i, chart in enumerate(report.spec.charts):
+        if chart.HasField("scalar"):
+            key = chart.title or chart.scalar.scalar_name or f"metric_{i}"
+            v = _cell_number(chart.scalar.cell_value)
+            if v is not None:
+                out.append((key, [(0.0, v)]))
+            continue
+        key = chart.title or f"metric_{i}"
+        for chart_field, list_field in _DATASET_FIELDS:
+            if not chart.HasField(chart_field):
+                continue
+            datasets = getattr(getattr(chart, chart_field), list_field)
+            for j, ds in enumerate(datasets):
+                name = key
+                if len(datasets) > 1:
+                    name = f"{key}/{ds.line_name or f'series_{j}'}"
+                out.append((name, [(p.x, p.y) for p in ds.points]))
+            break
+    return out
 
 
 def flatten_report_to_metrics(report: EvaluationReport) -> dict[str, float]:
@@ -32,9 +84,12 @@ def flatten_report_to_metrics(report: EvaluationReport) -> dict[str, float]:
     key-value pairs (MLflow ``log_metrics``, W&B ``wandb.log``, Comet
     ``log_metrics``, etc.) rather than a structured proto document.
 
-    Metric names are derived from each chart's title, falling back to
-    ``"metric_<index>"`` when the title is absent.  Only scalar (single
-    data-point) series are extracted; multi-point series are skipped.
+    Reads scalar charts and single-point series of line, point, bar and
+    time-series charts. Metric names come from the chart title (then
+    ``scalar_name``, then ``"metric_<index>"``); a chart with several series
+    keys each as ``"<title>/<line_name>"``. Multi-point series are skipped
+    with a warning; use :func:`flatten_report_to_metric_history` for those.
+    Tables and other chart types are ignored.
 
     Args:
         report: An ``EvaluationReport`` proto, typically as received in
@@ -46,6 +101,9 @@ def flatten_report_to_metrics(report: EvaluationReport) -> dict[str, float]:
 
     Example::
 
+        # scalar chart "accuracy"                -> {"accuracy": 0.95}
+        # line chart "loss", lines train and val -> {"loss/train": ..., "loss/val": ...}
+
         class MLflowEvalReportSink(EvalReportSink):
             def write(self, report, extra_fields=None):
                 import mlflow
@@ -55,38 +113,43 @@ def flatten_report_to_metrics(report: EvaluationReport) -> dict[str, float]:
                     namespace=report.metadata.namespace,
                 )
     """
-    from google.protobuf.json_format import MessageToDict
-
-    doc = MessageToDict(report, preserving_proto_field_name=True)
     metrics: dict[str, float] = {}
-    for i, chart in enumerate(doc.get("spec", {}).get("charts", [])):
-        key = chart.get("title") or f"metric_{i}"
-        series = chart.get("series", [])
-        if len(series) != 1:
-            # TODO(v2): support multi-series charts (comparison, overlays) — #1258
+    for key, points in _chart_series(report):
+        if len(points) != 1:
             _logger.warning(
-                "flatten_report_to_metrics: skipping %r — %d series (expected 1); "
-                "data will not appear in the returned dict",
+                "flatten_report_to_metrics: skipping %r — %d data points (expected "
+                "1); use flatten_report_to_metric_history for multi-point series",
                 key,
-                len(series),
+                len(points),
             )
             continue
-        data_points = series[0].get("data_points", [])
-        if len(data_points) != 1:
-            # TODO(v2): multi-point series; expose step for log_metric(step=) — #1258
-            _logger.warning(
-                "flatten_report_to_metrics: skipping %r — %d data points (expected 1); "
-                "data will not appear in the returned dict",
-                key,
-                len(data_points),
-            )
-            continue
-        v = data_points[0].get("value")
-        if v is None:
-            continue
-        with contextlib.suppress(TypeError, ValueError):
-            metrics[key] = float(v)
+        metrics[key] = points[0][1]
     return metrics
+
+
+def flatten_report_to_metric_history(
+    report: EvaluationReport,
+) -> dict[str, list[tuple[float, float]]]:
+    """Extract every numeric series as ``{metric_name: [(x, y), ...]}``.
+
+    Same chart coverage and naming as :func:`flatten_report_to_metrics`, but
+    multi-point series (learning curves, per-epoch metrics) are kept, with each
+    point's ``x`` as the step. Scalar charts yield a single ``(0.0, value)``.
+
+    Args:
+        report: An ``EvaluationReport`` proto.
+
+    Returns:
+        A dict mapping each metric name to its ``(x, y)`` points in order.
+
+    Example::
+
+        # line chart "loss" with lines train and val, one point per epoch
+        for key, points in flatten_report_to_metric_history(report).items():
+            for step, value in points:
+                mlflow.log_metric(key, value, step=int(step))
+    """
+    return dict(_chart_series(report))
 
 
 class EvalReportSink(ABC):
@@ -114,7 +177,7 @@ class EvalReportSink(ABC):
 
     Example implementation (imports and ``self._bucket`` initialisation elided)::
 
-        # MessageToDict is used the same way as in flatten_report_to_metrics()
+        # MessageToDict turns the proto into a JSON-serialisable dict
         from google.protobuf.json_format import MessageToDict
 
         class S3EvalReportSink(EvalReportSink):

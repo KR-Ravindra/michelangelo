@@ -6,6 +6,7 @@ Import from this package::
         EvalReportSink,
         LocalFileEvalReportSink,
         APIClientEvalReportSink,
+        flatten_report_to_metric_history,
         flatten_report_to_metrics,
     )
 """
@@ -17,6 +18,7 @@ from michelangelo.workflow.tasks.functions.eval_report_sinks.api import (
 )
 from michelangelo.workflow.tasks.functions.eval_report_sinks.base import (
     EvalReportSink,
+    flatten_report_to_metric_history,
     flatten_report_to_metrics,
 )
 from michelangelo.workflow.tasks.functions.eval_report_sinks.local_file import (
@@ -27,5 +29,6 @@ __all__ = [
     "APIClientEvalReportSink",
     "EvalReportSink",
     "LocalFileEvalReportSink",
+    "flatten_report_to_metric_history",
     "flatten_report_to_metrics",
 ]

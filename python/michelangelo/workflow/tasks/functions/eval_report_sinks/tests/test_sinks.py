@@ -10,6 +10,12 @@ from typing import Any
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
+from michelangelo.gen.api.v2.chart_pb2 import (
+    Chart,
+    ChartDataPoint,
+    ChartDataset,
+    ChartType,
+)
 from michelangelo.gen.api.v2.evaluation_report_pb2 import (
     EvaluationReport,
     EvaluationReportSpec,
@@ -17,7 +23,11 @@ from michelangelo.gen.api.v2.evaluation_report_pb2 import (
 from michelangelo.workflow.schema.eval_report_sinks.local_file import (
     LocalFileEvalReportSinkConfig,
 )
-from michelangelo.workflow.tasks.functions.eval_report_sinks.base import EvalReportSink
+from michelangelo.workflow.tasks.functions.eval_report_sinks.base import (
+    EvalReportSink,
+    flatten_report_to_metric_history,
+    flatten_report_to_metrics,
+)
 from michelangelo.workflow.tasks.functions.eval_report_sinks.local_file import (
     LocalFileEvalReportSink,
 )
@@ -375,97 +385,117 @@ class TestAPIClientEvalReportSink(TestCase):
 
 
 class TestFlattenReportToMetrics(TestCase):
-    """Tests for flatten_report_to_metrics().
+    """Tests for flatten_report_to_metrics() and flatten_report_to_metric_history().
 
-    flatten_report_to_metrics() uses MessageToDict to convert the proto, then
-    traverses doc["spec"]["charts"][i]["series"][0]["data_points"][0]["value"].
-    Tests mock MessageToDict to exercise the traversal logic without requiring
-    exact proto construction for each chart sub-type.
+    Reports are built from the real Chart protos so the helpers are checked
+    against the schema producers actually emit.
     """
 
-    _MSGTODICT = "google.protobuf.json_format.MessageToDict"
+    @staticmethod
+    def _report_with(*charts: Chart) -> EvaluationReport:
+        r = _report()
+        r.spec.charts.extend(charts)
+        return r
 
-    def _run(self, charts: list) -> dict:
-        from michelangelo.workflow.tasks.functions.eval_report_sinks.base import (
-            flatten_report_to_metrics,
-        )
-
-        doc = {"spec": {"charts": charts}}
-        with patch(self._MSGTODICT, return_value=doc):
-            return flatten_report_to_metrics(_report())
+    @staticmethod
+    def _line_chart(title: str, *lines: tuple[str, list[tuple[float, float]]]):
+        chart = Chart(chart_type=ChartType.CHART_TYPE_LINE_CHART, title=title)
+        for name, points in lines:
+            chart.line_chart.lines.append(
+                ChartDataset(
+                    line_name=name,
+                    points=[ChartDataPoint(x=x, y=y) for x, y in points],
+                )
+            )
+        return chart
 
     def test_empty_report_returns_empty_dict(self):
         """It returns {} when there are no charts."""
-        from michelangelo.workflow.tasks.functions.eval_report_sinks.base import (
-            flatten_report_to_metrics,
+        self.assertEqual(flatten_report_to_metrics(_report()), {})
+        self.assertEqual(flatten_report_to_metric_history(_report()), {})
+
+    def test_scalar_chart_extracted(self):
+        """It extracts title -> number for a scalar chart."""
+        chart = Chart(chart_type=ChartType.CHART_TYPE_SCALAR, title="accuracy")
+        chart.scalar.cell_value.number = 0.95
+        result = flatten_report_to_metrics(self._report_with(chart))
+        self.assertEqual(result, {"accuracy": 0.95})
+
+    def test_scalar_name_and_index_fallbacks(self):
+        """It uses scalar_name, then metric_<i>, when the title is empty."""
+        named = Chart(chart_type=ChartType.CHART_TYPE_SCALAR)
+        named.scalar.scalar_name = "auc"
+        named.scalar.cell_value.number = 0.7
+        unnamed = Chart(chart_type=ChartType.CHART_TYPE_SCALAR)
+        unnamed.scalar.cell_value.number = 0.8
+        result = flatten_report_to_metrics(self._report_with(named, unnamed))
+        self.assertEqual(result, {"auc": 0.7, "metric_1": 0.8})
+
+    def test_scalar_str_value(self):
+        """It parses a numeric str_value and drops a non-numeric one."""
+        good = Chart(chart_type=ChartType.CHART_TYPE_SCALAR, title="f1")
+        good.scalar.cell_value.str_value = "0.5"
+        bad = Chart(chart_type=ChartType.CHART_TYPE_SCALAR, title="bad")
+        bad.scalar.cell_value.str_value = "n/a"
+        result = flatten_report_to_metrics(self._report_with(good, bad))
+        self.assertEqual(result, {"f1": 0.5})
+
+    def test_single_point_line_uses_chart_title(self):
+        """It maps a one-line, one-point chart to its title."""
+        chart = self._line_chart("loss", ("train", [(3.0, 0.25)]))
+        result = flatten_report_to_metrics(self._report_with(chart))
+        self.assertEqual(result, {"loss": 0.25})
+
+    def test_multi_series_keys_use_line_name(self):
+        """It keys each series of a multi-series chart by title/line_name."""
+        chart = self._line_chart("loss", ("train", [(1.0, 0.3)]), ("", [(1.0, 0.4)]))
+        result = flatten_report_to_metrics(self._report_with(chart))
+        self.assertEqual(result, {"loss/train": 0.3, "loss/series_1": 0.4})
+
+    def test_other_dataset_chart_types(self):
+        """It reads point, bar and time-series charts the same way."""
+        point = Chart(chart_type=ChartType.CHART_TYPE_POINT_CHART, title="p")
+        point.point_chart.point_sets.append(
+            ChartDataset(points=[ChartDataPoint(x=0, y=1.0)])
         )
+        bar = Chart(chart_type=ChartType.CHART_TYPE_BAR_CHART, title="b")
+        bar.bar_chart.bars.append(ChartDataset(points=[ChartDataPoint(x=0, y=2.0)]))
+        ts = Chart(chart_type=ChartType.CHART_TYPE_TIME_SERIES, title="t")
+        ts.time_series.lines.append(ChartDataset(points=[ChartDataPoint(x=0, y=3.0)]))
+        result = flatten_report_to_metrics(self._report_with(point, bar, ts))
+        self.assertEqual(result, {"p": 1.0, "b": 2.0, "t": 3.0})
 
-        with patch(self._MSGTODICT, return_value={}):
-            self.assertEqual(flatten_report_to_metrics(_report()), {})
-
-    def test_single_scalar_chart_extracted(self):
-        """It extracts title→float for a chart with one single-point series."""
-        result = self._run(
-            [
-                {"title": "accuracy", "series": [{"data_points": [{"value": "0.95"}]}]},
-            ]
-        )
-        self.assertAlmostEqual(result["accuracy"], 0.95)
-
-    def test_missing_title_falls_back_to_index(self):
-        """It uses metric_<i> when title is absent."""
-        result = self._run(
-            [
-                {"series": [{"data_points": [{"value": "0.8"}]}]},
-            ]
-        )
-        self.assertAlmostEqual(result["metric_0"], 0.8)
-
-    def test_non_numeric_value_silently_skipped(self):
-        """It silently drops data points whose value cannot be cast to float."""
-        result = self._run(
-            [
-                {"title": "bad", "series": [{"data_points": [{"value": "n/a"}]}]},
-            ]
-        )
-        self.assertNotIn("bad", result)
-
-    def test_missing_value_key_skipped(self):
-        """It skips data points with no 'value' key rather than recording 0.0."""
-        result = self._run(
-            [
-                {"title": "no-val", "series": [{"data_points": [{}]}]},
-            ]
-        )
-        self.assertNotIn("no-val", result)
-
-    def test_multi_point_series_skipped(self):
-        """It skips charts whose series has more than one data point."""
-        result = self._run(
-            [
-                {
-                    "title": "loss_curve",
-                    "series": [{"data_points": [{"value": "0.9"}, {"value": "0.8"}]}],
-                }
-            ]
-        )
-        self.assertNotIn("loss_curve", result)
-
-    def test_multi_point_skip_emits_warning(self):
-        """Skipping a multi-point series emits a WARNING-level log."""
+    def test_multi_point_series_skipped_with_warning(self):
+        """It leaves multi-point series out of the scalar dict and warns."""
         import logging
 
+        chart = self._line_chart("curve", ("val", [(0, 0.9), (1, 0.8)]))
         with self.assertLogs(
             "michelangelo.workflow.tasks.functions.eval_report_sinks.base",
             level=logging.WARNING,
         ):
-            self._run(
-                [
-                    {
-                        "title": "curve",
-                        "series": [
-                            {"data_points": [{"value": "0.9"}, {"value": "0.8"}]}
-                        ],
-                    }
-                ]
-            )
+            result = flatten_report_to_metrics(self._report_with(chart))
+        self.assertEqual(result, {})
+
+    def test_history_keeps_every_point_with_its_step(self):
+        """It returns (x, y) pairs for every series, including multi-point."""
+        curve = self._line_chart(
+            "loss", ("train", [(0, 0.9), (1, 0.7)]), ("val", [(0, 1.0)])
+        )
+        scalar = Chart(chart_type=ChartType.CHART_TYPE_SCALAR, title="acc")
+        scalar.scalar.cell_value.number = 0.9
+        result = flatten_report_to_metric_history(self._report_with(curve, scalar))
+        self.assertEqual(
+            result,
+            {
+                "loss/train": [(0.0, 0.9), (1.0, 0.7)],
+                "loss/val": [(0.0, 1.0)],
+                "acc": [(0.0, 0.9)],
+            },
+        )
+
+    def test_unsupported_chart_types_ignored(self):
+        """It ignores tables and other charts without numeric series."""
+        chart = Chart(chart_type=ChartType.CHART_TYPE_TABLE, title="Metrics")
+        chart.table.column_names.append("metric")
+        self.assertEqual(flatten_report_to_metrics(self._report_with(chart)), {})
