@@ -271,6 +271,23 @@ def init_arguments(p: argparse.ArgumentParser):
         default=[],
         help="Pass arbitrary --set KEY=VALUE flags through to helm upgrade/install.",
     )
+    sync_p.add_argument(
+        "--create-compute-cluster",
+        action="store_true",
+        help=(
+            "Register a dedicated cluster for Ray jobs, creating it if it does "
+            "not exist yet."
+        ),
+    )
+    sync_p.add_argument(
+        "--compute-cluster-name",
+        default=_default_compute_kube_cluster_name,
+        help=(
+            f"Name of the dedicated compute cluster used with "
+            f"--create-compute-cluster "
+            f"(default: {_default_compute_kube_cluster_name})."
+        ),
+    )
 
     demo_p = sp.add_parser(
         "demo", help="Create demo project and pipelines in the sandbox cluster."
@@ -534,6 +551,34 @@ def _sync(ns: argparse.Namespace):
         )
 
     _helm_wait(ns)
+
+    # _create() sets these up too; without them a sync after a partial create
+    # leaves InferenceServers unable to reach the compute cluster.
+    _setup_compute_cluster(ns, sync=True)
+
+
+def _setup_compute_cluster(ns: argparse.Namespace, sync: bool = False):
+    """Register the compute cluster: Cluster CRD, RBAC and access Secrets.
+
+    Without --create-compute-cluster the control plane cluster doubles as the
+    compute cluster. On sync, an existing dedicated cluster is reused.
+    """
+    if getattr(ns, "create_compute_cluster", False):
+        name = getattr(ns, "compute_cluster_name", _default_compute_kube_cluster_name)
+        exists = (
+            sync
+            and subprocess.run(
+                ["k3d", "cluster", "get", name], capture_output=True
+            ).returncode
+            == 0
+        )
+        if not exists:
+            _create_compute_cluster(name)
+    else:
+        name = _michelangelo_sandbox_kube_cluster_name
+    _create_compute_cluster_crd(name)
+    _apply_compute_cluster_rbac(name)
+    _create_compute_cluster_secrets(name)
 
 
 def _manifest_pod_image(manifest: str, name: str) -> str:
@@ -1118,22 +1163,7 @@ def _deploy_services(ns: argparse.Namespace):
     if ns.workflow == "cadence":
         _create_cadence_domain(links)
 
-    # Create separate compute cluster if requested
-    create_compute_cluster = getattr(ns, "create_compute_cluster", False)
-    compute_cluster_name = getattr(
-        ns, "compute_cluster_name", _default_compute_kube_cluster_name
-    )
-    if create_compute_cluster:
-        _create_compute_cluster(compute_cluster_name)
-        _create_compute_cluster_crd(compute_cluster_name)
-        _apply_compute_cluster_rbac(compute_cluster_name)
-        _create_compute_cluster_secrets(compute_cluster_name)
-    else:
-        # Use the control plane cluster as the default compute cluster if a
-        # dedicated compute cluster is not requested
-        _create_compute_cluster_crd(_michelangelo_sandbox_kube_cluster_name)
-        _apply_compute_cluster_rbac(_michelangelo_sandbox_kube_cluster_name)
-        _create_compute_cluster_secrets(_michelangelo_sandbox_kube_cluster_name)
+    _setup_compute_cluster(ns)
 
     _kube_wait()
 

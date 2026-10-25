@@ -720,3 +720,94 @@ class TestManifestPodImage:
         from michelangelo.cli.sandbox.sandbox import _manifest_pod_image
 
         assert _manifest_pod_image("mysql.yaml", "nope") == ""
+
+
+class SyncComputeClusterTest(TestCase):
+    """`_sync` must register the compute cluster the way `_create` does."""
+
+    def _run_sync(self, ns, k3d_clusters=("michelangelo-sandbox",)):
+        def fake_run(args, *a, **kw):
+            if args[:3] == ["k3d", "cluster", "get"]:
+                return Mock(returncode=0 if args[3] in k3d_clusters else 1)
+            return Mock(returncode=0, stdout='{"info":{"status":"deployed"}}')
+
+        mocks = {}
+        names = [
+            "_exec",
+            "_ensure_mysql_running",
+            "_ensure_object_store_running",
+            "_refresh_mysql_schema",
+            "_ensure_credentials_secret",
+            "_helm_ensure_repos",
+            "_helm_wait",
+            "_create_compute_cluster",
+            "_create_compute_cluster_crd",
+            "_apply_compute_cluster_rbac",
+            "_create_compute_cluster_secrets",
+        ]
+        patchers = [patch(f"michelangelo.cli.sandbox.sandbox.{n}") for n in names] + [
+            patch(
+                "michelangelo.cli.sandbox.sandbox._build_helm_set_args",
+                return_value=[],
+            ),
+            patch(
+                "michelangelo.cli.sandbox.sandbox.subprocess.run",
+                side_effect=fake_run,
+            ),
+        ]
+        for n, p in zip(names, patchers):
+            mocks[n] = p.start()
+        for p in patchers[len(names) :]:
+            p.start()
+        self.addCleanup(patch.stopall)
+        sandbox._sync(ns)
+        return mocks
+
+    def _ns(self, **kw):
+        return argparse.Namespace(
+            workflow="cadence",
+            object_store="minio",
+            exclude=[],
+            include_experimental=[],
+            helm_set=[],
+            wait_timeout=600,
+            **kw,
+        )
+
+    def test_sync_registers_sandbox_as_compute_cluster(self):
+        """Without a dedicated cluster, sync re-applies CRD, RBAC and Secrets."""
+        m = self._run_sync(self._ns())
+        name = "michelangelo-sandbox"
+        m["_create_compute_cluster_crd"].assert_called_once_with(name)
+        m["_apply_compute_cluster_rbac"].assert_called_once_with(name)
+        m["_create_compute_cluster_secrets"].assert_called_once_with(name)
+        m["_create_compute_cluster"].assert_not_called()
+
+    def test_sync_reuses_existing_dedicated_compute_cluster(self):
+        """An existing dedicated compute cluster is registered, not recreated."""
+        m = self._run_sync(
+            self._ns(create_compute_cluster=True, compute_cluster_name="c0"),
+            k3d_clusters=("michelangelo-sandbox", "c0"),
+        )
+        m["_create_compute_cluster"].assert_not_called()
+        m["_create_compute_cluster_crd"].assert_called_once_with("c0")
+        m["_apply_compute_cluster_rbac"].assert_called_once_with("c0")
+        m["_create_compute_cluster_secrets"].assert_called_once_with("c0")
+
+    def test_sync_creates_missing_dedicated_compute_cluster(self):
+        """A dedicated compute cluster that does not exist yet is created."""
+        m = self._run_sync(
+            self._ns(create_compute_cluster=True, compute_cluster_name="c0")
+        )
+        m["_create_compute_cluster"].assert_called_once_with("c0")
+        m["_create_compute_cluster_crd"].assert_called_once_with("c0")
+
+    def test_sync_accepts_compute_cluster_flags(self):
+        """`ma sandbox sync` takes the same compute-cluster flags as create."""
+        parser = argparse.ArgumentParser()
+        sandbox.init_arguments(parser)
+        ns = parser.parse_args(
+            ["sync", "--create-compute-cluster", "--compute-cluster-name", "c0"]
+        )
+        self.assertTrue(ns.create_compute_cluster)
+        self.assertEqual(ns.compute_cluster_name, "c0")
