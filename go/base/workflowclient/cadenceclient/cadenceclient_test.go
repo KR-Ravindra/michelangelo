@@ -72,6 +72,35 @@ func TestStartWorkflow(t *testing.T) {
 	}
 }
 
+func TestStartWorkflowAdoptsAlreadyStartedExecution(t *testing.T) {
+	runID := "existingRunID"
+	mockClient := &cadencemocks.Client{}
+	mockClient.On("StartWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(
+		nil,
+		&shared.WorkflowExecutionAlreadyStartedError{RunId: &runID},
+	)
+	client := &CadenceClient{Client: mockClient}
+
+	execution, err := client.StartWorkflow(
+		context.Background(), clientInterface.StartWorkflowOptions{ID: "testWorkflowID"}, "testWorkflow")
+	require.NoError(t, err)
+	assert.Equal(t, &clientInterface.WorkflowExecution{ID: "testWorkflowID", RunID: runID}, execution)
+}
+
+func TestStartWorkflowAlreadyStartedWithoutRunID(t *testing.T) {
+	mockClient := &cadencemocks.Client{}
+	mockClient.On("StartWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(
+		nil,
+		&shared.WorkflowExecutionAlreadyStartedError{},
+	)
+	client := &CadenceClient{Client: mockClient}
+
+	_, err := client.StartWorkflow(
+		context.Background(), clientInterface.StartWorkflowOptions{ID: "testWorkflowID"}, "testWorkflow")
+	var alreadyStarted *shared.WorkflowExecutionAlreadyStartedError
+	assert.ErrorAs(t, err, &alreadyStarted)
+}
+
 func TestStartWorkflowRejectsStartPaused(t *testing.T) {
 	client := &CadenceClient{Client: &cadencemocks.Client{}}
 	_, err := client.StartWorkflow(

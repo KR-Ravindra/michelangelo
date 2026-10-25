@@ -2,6 +2,7 @@ package cadenceclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -68,6 +69,17 @@ func (c *CadenceClient) StartWorkflow(ctx context.Context, options clientInterfa
 		CronSchedule:                    options.CronSchedule,
 	}
 	cadenceWorkflowExecution, err := c.Client.StartWorkflow(ctx, cadenceOptions, workflowName, args...)
+	// A start retried after a lost status write (e.g. a reconcile that hit an update
+	// conflict) finds its own workflow already running. Return that execution, as the
+	// Temporal SDK does by default, instead of failing the caller over a start that
+	// already happened.
+	var alreadyStarted *shared.WorkflowExecutionAlreadyStartedError
+	if errors.As(err, &alreadyStarted) && alreadyStarted.GetRunId() != "" {
+		return &clientInterface.WorkflowExecution{
+			ID:    options.ID,
+			RunID: alreadyStarted.GetRunId(),
+		}, nil
+	}
 	if err != nil {
 		return nil, err
 	}
